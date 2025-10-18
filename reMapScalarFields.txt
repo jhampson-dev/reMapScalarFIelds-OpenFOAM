@@ -1,0 +1,98 @@
+functions
+{
+    remapC
+    {
+        type coded;
+        functionObjectLibs ("libcodedFunctionObject.so");
+        enabled true;
+		// Not sure how needed this is. Delays the execution of the function. Maybe to ensure execution at t = mT for m \in N excl. 0.
+        timeStart 0.1;
+		// After this time, the functionObject becomes inactive.
+        timeEnd 1000;
+        log true;
+        codeExecute
+        #{
+			// Retrieves displacement field S from the mesh's "object registry". 
+			// Requires S is already defined as a field on the mesh, via a file in 0/S.
+			// "const" means S is being read only, not modified.
+            const volVectorField& S = mesh().lookupObject<volVectorField>("S");
+	
+			// No "const" means we're about to modify field C.
+			volScalarField& C = mesh().lookupObjectRef<volScalarField>("C");					
+			// LESS SAFE ALTERNATIVE TO ABOVE LINES			
+			// "const_cast" tells the compiler that we WILL be modifying the value of C. Casting off the const status. Risky code?
+            //volScalarField& C = const_cast<volScalarField&>(
+            //    mesh().lookupObject<volScalarField>("C")
+            );
+
+            // Create a new (temporary) volScalarField to hold the updated values
+			//runtime.timeName() is the current simulation time.
+			//mesh() is the field the field C_new is attached to.
+			//IOobject::NO_READ -> Do not try to read field from disk as field is being created from scratch.
+			//IOobject::NO_WRITE -> Don;t write field to disk, it is a temporary field held in memory.
+			// dimensionedScalar() sets initial value of every cell in the field (zero in this case).
+			// C.dimensions() gives C_new the same dimensions as C.
+            volScalarField C_new
+            (
+                IOobject("C_new", runTime.timeName(), mesh(),
+                         IOobject::NO_READ, IOobject::NO_WRITE),
+                mesh(),
+                dimensionedScalar("zero", C.dimensions(), 0.0)
+            );
+
+            // Interpolate C at displaced locations
+            // Create interpolator
+			// interpolationCellPoint is a built-in OpenFOAM class that interpolates values of a volume field at arbitrary points in space (not just mesh points).
+			// We want to sample the field C, newly updated (?), that aren't necessarily on the mesh.
+            interpolationCellPoint<scalar> interpolator(C);
+			
+			int outOfBoundsCount = 0;
+			
+            forAll(C, cellI)
+            {
+				// point& cellCentre = mesh().C()[cellI] returns the geometric centre of all cells (all because we're in the forAll macro).
+				// cellI is the index of the current cell.
+                const point& cellCentre = mesh().C()[cellI];
+				// Retrieve the shift vector from the S field at the current cell.
+				const vector& shift = S[cellI];
+				// Gives the source location from which to sample C. Similar to a backwards mapping. "Where did the value at this cell come from, if it were shifted forward by S"
+                const point newPoint = cellCentre - shift;
+				
+				const label srcCell = mesh().findCell(newPoint);
+
+				if (srcCell != -1)
+				{
+					// Interpolate C at new location
+					C_new[cellI] = interpolator.interpolate(newPoint);
+				}
+				else
+				{
+					// newPoint is outside the mesh – assign fallback
+					// You decide what makes sense here:
+					C_new[cellI] = 0.0;         // Option 1: Field values mapped outside to domain are value zero, loss to surroundings.
+					// C_new[cellI] = C[cellI]; // Option 2: Keep old value.
+					// C_new[cellI] = boundary value or some extrapolated logic.
+					// Increment counter for how many times C is mapped outside the domain.
+					outOfBoundsCount++;
+				}
+            }
+			
+			Info << "Points outside mesh during remap: " << outOfBoundsCount << endl;
+
+            // Assign updated field
+            C.internalField() = C_new.internalField();
+            C.correctBoundaryConditions();
+        #};
+        executeControl timeStep;
+        executeInterval 10; // execute every 10 timesteps or set based on your T
+		
+		// Alternate method, tying the execution to the timestep.
+		// T = 1.0;
+		// executeInterval = T / deltaT = 100;
+	
+		
+		// Alternate method, manual definition of times to execute map
+		// executeControl time;
+		// executeTimes (1 2 3 4 5); // in seconds
+    }
+}
